@@ -1,46 +1,41 @@
-// App.tsx - MedIntelli Paciente V3 (arquivo único)
-// -------------------------------------------------
-// DEPENDÊNCIAS: "react", "react-dom", "@supabase/supabase-js"
-// VARS AMBIENTE: mesmo Supabase + OpenAI da clínica
-// -------------------------------------------------
-// TABELAS ADICIONAIS SUGERIDAS:
-//
-// alter table patients add column cpf text;
-// alter table patients add column email text;
-//
-// create table patient_documents (
-//   id uuid primary key default gen_random_uuid(),
-//   patient_id uuid references patients(id) on delete cascade,
-//   type text, -- "exame", "receita", "atestado", etc.
-//   title text,
-//   url text,
-//   created_at timestamptz default now()
-// );
-//
-// create table patient_messages (
-//   id uuid primary key default gen_random_uuid(),
-//   patient_id uuid references patients(id) on delete cascade,
-//   channel text default 'whatsapp',
-//   content text,
-//   created_at timestamptz default now()
-// );
-//
-// (appointments é compartilhada com a clínica.)
+// App.tsx – MedIntelli Paciente V3 (arquivo único)
+
+// Requisitos:
+// 1) Mesma base Supabase do app da clínica (patients, appointments).
+// 2) Campo cpf em patients (para login).
+// 3) Variáveis de ambiente:
+//    VITE_SUPABASE_URL
+//    VITE_SUPABASE_ANON_KEY
+//    VITE_OPENAI_API_KEY
 
 import React, { useEffect, useState } from "react";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
-const supabaseUrlP = import.meta.env.VITE_SUPABASE_URL as string;
-const supabaseKeyP = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
-const supabaseP: SupabaseClient = createClient(supabaseUrlP, supabaseKeyP);
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string;
+const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+
+if (!supabaseUrl || !supabaseKey) {
+  console.warn("⚠️ Configure VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY.");
+}
+
+const supabase: SupabaseClient = createClient(supabaseUrl, supabaseKey);
+
+type Section =
+  | "login"
+  | "home"
+  | "consultas"
+  | "agendar"
+  | "chat"
+  | "dados"
+  | "docs";
 
 type Patient = {
   id: string;
   name: string;
   cpf: string | null;
-  email: string | null;
   phone: string | null;
   birth_date: string | null;
+  notes: string | null;
 };
 
 type Appointment = {
@@ -50,73 +45,108 @@ type Appointment = {
   reason: string | null;
 };
 
-type Document = {
-  id: string;
-  type: string | null;
-  title: string | null;
-  url: string | null;
-  created_at: string;
+type ChatMessage = {
+  role: "user" | "assistant";
+  content: string;
 };
-
-type Message = {
-  id: string;
-  channel: string | null;
-  content: string | null;
-  created_at: string;
-};
-
-type PacSection =
-  | "home"
-  | "consultas"
-  | "agendar"
-  | "chat"
-  | "documentos"
-  | "mensagens";
-
-type ChatMsg = { role: "user" | "assistant"; content: string };
 
 const PATIENT_KB = `
-Você é o assistente voltado ao paciente da clínica MedIntelli.
-Forneça respostas amigáveis e simples sobre:
-- agendamento de consultas
-- retornos
-- preparo de exames
-- orientações gerais
-Nunca dê diagnóstico nem medicamentos. Oriente a procurar o médico.
+Você é o assistente de pacientes da clínica MedIntelli.
+
+Regras:
+- Responda com empatia, clareza e educação.
+- Ajude o paciente a entender: agendamentos, retornos, horários, orientações gerais.
+- NÃO faça diagnóstico, NÃO prescreva medicamentos.
+- Em urgência, oriente procurar pronto-atendimento ou ligar para a clínica.
 `;
 
-function LoginPaciente(props: { onLogin: (p: Patient) => void }) {
+// ----------------------
+// Layout simples
+// ----------------------
+function TopBar(props: {
+  patient: Patient;
+  onChangeSection: (s: Section) => void;
+  onLogout: () => void;
+}) {
+  return (
+    <header
+      style={{
+        background: "#1a73e8",
+        color: "#fff",
+        padding: "8px 16px",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+      }}
+    >
+      <div>
+        <div style={{ fontWeight: 700 }}>MedIntelli Paciente</div>
+        <div style={{ fontSize: 13 }}>
+          Olá, <b>{patient.name}</b>
+        </div>
+      </div>
+      <nav style={{ display: "flex", gap: 8, fontSize: 13 }}>
+        <button onClick={() => props.onChangeSection("home")}>Início</button>
+        <button onClick={() => props.onChangeSection("consultas")}>
+          Minhas consultas
+        </button>
+        <button onClick={() => props.onChangeSection("agendar")}>
+          Agendar
+        </button>
+        <button onClick={() => props.onChangeSection("chat")}>
+          Chat com a clínica
+        </button>
+        <button onClick={() => props.onChangeSection("dados")}>Meus dados</button>
+        <button onClick={() => props.onChangeSection("docs")}>Documentos</button>
+        <button onClick={props.onLogout}>Sair</button>
+      </nav>
+    </header>
+  );
+}
+
+// ----------------------
+// Login (A: CPF)
+// ----------------------
+function LoginScreen(props: {
+  onLoggedIn: (p: Patient) => void;
+}) {
+  const [loginMode, setLoginMode] = useState<"cpf" | "account" | "whatsapp">(
+    "cpf"
+  );
   const [cpf, setCpf] = useState("");
-  const [nasc, setNasc] = useState("");
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  async function handleLogin(e: React.FormEvent) {
+  async function handleCpfLogin(e: React.FormEvent) {
     e.preventDefault();
+    if (!cpf.trim()) return;
+    setLoading(true);
     setError("");
-    if (!cpf.trim() || !nasc) {
-      setError("Informe CPF e data de nascimento.");
-      return;
-    }
 
-    const { data, error } = await supabaseP
-      .from("patients")
-      .select("*")
-      .eq("cpf", cpf.trim())
-      .eq("birth_date", nasc)
-      .maybeSingle();
+    try {
+      const { data, error } = await supabase
+        .from("patients")
+        .select("id,name,cpf,phone,birth_date,notes")
+        .eq("cpf", cpf.trim())
+        .maybeSingle();
 
-    if (error) {
-      console.error(error);
-      setError("Erro ao buscar paciente.");
-    } else if (!data) {
-      setError("Não encontramos cadastro com estes dados.");
-    } else {
-      const patient = data as Patient;
-      localStorage.setItem(
-        "medintelli_paciente_session",
-        JSON.stringify(patient)
-      );
-      props.onLogin(patient);
+      if (error) {
+        console.error(error);
+        setError("Erro ao buscar paciente. Tente novamente.");
+      } else if (!data) {
+        setError(
+          "CPF não encontrado. Verifique se seu cadastro está atualizado na clínica."
+        );
+      } else {
+        const patient = data as Patient;
+        localStorage.setItem("medintelli_patient_id", patient.id);
+        props.onLoggedIn(patient);
+      }
+    } catch (e) {
+      console.error(e);
+      setError("Erro inesperado. Tente novamente.");
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -124,242 +154,297 @@ function LoginPaciente(props: { onLogin: (p: Patient) => void }) {
     <div
       style={{
         minHeight: "100vh",
-        background: "#e8f2ff",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
+        background: "#f5f5f5",
         fontFamily: "system-ui, sans-serif",
       }}
     >
       <div
         style={{
-          width: "100%",
-          maxWidth: 360,
+          width: 360,
           background: "#fff",
-          padding: 24,
           borderRadius: 12,
-          boxShadow: "0 2px 10px rgba(0,0,0,0.08)",
+          padding: 20,
+          boxShadow: "0 4px 10px rgba(0,0,0,0.06)",
         }}
       >
-        <h1 style={{ marginTop: 0, marginBottom: 12, fontSize: 22 }}>
-          MedIntelli Paciente
-        </h1>
-        <p style={{ fontSize: 13, marginBottom: 12 }}>
-          Informe seus dados para acessar o portal do paciente.
-        </p>
-        <form
-          onSubmit={handleLogin}
-          style={{ display: "grid", gap: 8, marginTop: 8 }}
-        >
-          <input
-            value={cpf}
-            onChange={(e) => setCpf(e.target.value)}
-            placeholder="CPF"
-            style={{ padding: 8, borderRadius: 8, border: "1px solid #ccc" }}
-          />
-          <input
-            type="date"
-            value={nasc}
-            onChange={(e) => setNasc(e.target.value)}
-            style={{ padding: 8, borderRadius: 8, border: "1px solid #ccc" }}
-          />
-          {error && (
-            <p style={{ color: "red", fontSize: 12, margin: 0 }}>{error}</p>
-          )}
-          <button
-            type="submit"
-            style={{
-              padding: "8px 12px",
-              borderRadius: 8,
-              border: "none",
-              background: "#1a73e8",
-              color: "#fff",
-              cursor: "pointer",
-              marginTop: 4,
-            }}
-          >
-            Entrar
-          </button>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-function HeaderPaciente(props: {
-  patient: Patient;
-  section: PacSection;
-  onChangeSection: (s: PacSection) => void;
-  onLogout: () => void;
-}) {
-  const items: { id: PacSection; label: string }[] = [
-    { id: "home", label: "Início" },
-    { id: "consultas", label: "Minhas Consultas" },
-    { id: "agendar", label: "Agendar/Reagendar" },
-    { id: "chat", label: "Chat IA" },
-    { id: "documentos", label: "Exames e Receitas" },
-    { id: "mensagens", label: "Mensagens" },
-  ];
-
-  return (
-    <header
-      style={{
-        background: "#1a73e8",
-        color: "#fff",
-        padding: "10px 16px",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-      }}
-    >
-      <div>
-        <strong>MedIntelli Paciente</strong>
-        <div style={{ fontSize: 12 }}>
-          Olá, {props.patient.name || "Paciente"}!
-        </div>
-      </div>
-      <nav style={{ display: "flex", gap: 6, fontSize: 13 }}>
-        {items.map((item) => (
-          <button
-            key={item.id}
-            onClick={() => props.onChangeSection(item.id)}
-            style={{
-              border: "none",
-              background:
-                props.section === item.id ? "rgba(255,255,255,0.2)" : "transparent",
-              color: "#fff",
-              padding: "4px 8px",
-              borderRadius: 999,
-              cursor: "pointer",
-            }}
-          >
-            {item.label}
-          </button>
-        ))}
-        <button
-          onClick={props.onLogout}
+        <h1
           style={{
-            border: "none",
-            background: "rgba(0,0,0,0.15)",
-            color: "#fff",
-            padding: "4px 10px",
-            borderRadius: 999,
-            cursor: "pointer",
+            fontSize: 20,
+            marginBottom: 4,
+            textAlign: "center",
+            color: "#1a3f8b",
           }}
         >
-          Sair
-        </button>
-      </nav>
-    </header>
-  );
-}
+          MedIntelli Paciente
+        </h1>
+        <p
+          style={{
+            fontSize: 13,
+            textAlign: "center",
+            marginBottom: 12,
+            color: "#555",
+          }}
+        >
+          Acompanhe suas consultas, dados e recados da clínica.
+        </p>
 
-function HomePaciente(props: { patient: Patient }) {
-  return (
-    <div style={{ padding: 16 }}>
-      <h2 style={{ marginTop: 0 }}>Resumo do Paciente</h2>
-      <div
-        style={{
-          maxWidth: 480,
-          background: "#fff",
-          padding: 16,
-          borderRadius: 10,
-          boxShadow: "0 1px 4px rgba(0,0,0,0.05)",
-          fontSize: 14,
-        }}
-      >
-        <p>
-          <strong>Nome:</strong> {props.patient.name}
-        </p>
-        <p>
-          <strong>CPF:</strong> {props.patient.cpf || "-"}
-        </p>
-        <p>
-          <strong>E-mail:</strong> {props.patient.email || "-"}
-        </p>
-        <p>
-          <strong>Telefone:</strong> {props.patient.phone || "-"}
-        </p>
-        <p>
-          <strong>Data de nascimento:</strong>{" "}
-          {props.patient.birth_date || "-"}
-        </p>
+        {/* Abas de login */}
+        <div
+          style={{
+            display: "flex",
+            borderRadius: 999,
+            background: "#eef2ff",
+            padding: 3,
+            marginBottom: 12,
+          }}
+        >
+          <button
+            onClick={() => setLoginMode("cpf")}
+            style={{
+              flex: 1,
+              border: "none",
+              borderRadius: 999,
+              padding: "6px 8px",
+              fontSize: 12,
+              cursor: "pointer",
+              background: loginMode === "cpf" ? "#1a73e8" : "transparent",
+              color: loginMode === "cpf" ? "#fff" : "#333",
+            }}
+          >
+            CPF (ativo)
+          </button>
+          <button
+            onClick={() => setLoginMode("account")}
+            style={{
+              flex: 1,
+              border: "none",
+              borderRadius: 999,
+              padding: "6px 8px",
+              fontSize: 12,
+              cursor: "pointer",
+              background: loginMode === "account" ? "#1a73e8" : "transparent",
+              color: loginMode === "account" ? "#fff" : "#333",
+            }}
+          >
+            Conta (em breve)
+          </button>
+          <button
+            onClick={() => setLoginMode("whatsapp")}
+            style={{
+              flex: 1,
+              border: "none",
+              borderRadius: 999,
+              padding: "6px 8px",
+              fontSize: 12,
+              cursor: "pointer",
+              background: loginMode === "whatsapp" ? "#1a73e8" : "transparent",
+              color: loginMode === "whatsapp" ? "#fff" : "#333",
+            }}
+          >
+            WhatsApp (em breve)
+          </button>
+        </div>
+
+        {loginMode === "cpf" && (
+          <form onSubmit={handleCpfLogin} style={{ display: "grid", gap: 8 }}>
+            <label style={{ fontSize: 12 }}>Digite seu CPF</label>
+            <input
+              value={cpf}
+              onChange={(e) => setCpf(e.target.value)}
+              placeholder="Somente números"
+              style={{
+                padding: 8,
+                borderRadius: 8,
+                border: "1px solid #ccc",
+                fontSize: 14,
+              }}
+            />
+            {error && (
+              <div style={{ color: "red", fontSize: 12 }}>{error}</div>
+            )}
+            <button
+              type="submit"
+              disabled={loading}
+              style={{
+                marginTop: 4,
+                padding: "8px 12px",
+                borderRadius: 8,
+                border: "none",
+                background: "#1a73e8",
+                color: "#fff",
+                cursor: "pointer",
+              }}
+            >
+              {loading ? "Entrando..." : "Entrar"}
+            </button>
+            <p style={{ fontSize: 11, color: "#777", marginTop: 6 }}>
+              Se o CPF não estiver cadastrado, entre em contato com a clínica.
+            </p>
+          </form>
+        )}
+
+        {loginMode === "account" && (
+          <div style={{ fontSize: 12, color: "#666", marginTop: 8 }}>
+            Login com conta (e-mail/senha) será habilitado em breve, usando um
+            cadastro próprio vinculado ao seu prontuário.
+          </div>
+        )}
+
+        {loginMode === "whatsapp" && (
+          <div style={{ fontSize: 12, color: "#666", marginTop: 8 }}>
+            Login via WhatsApp (código enviado pelo AVISA API) será habilitado
+            em breve. A arquitetura já está preparada para isso.
+          </div>
+        )}
       </div>
-      <p style={{ marginTop: 16, fontSize: 13 }}>
-        Aqui você acompanha suas consultas, solicita novos horários, acessa
-        exames, receitas e pode tirar dúvidas pelo Chat IA.
-      </p>
     </div>
   );
 }
 
-function ConsultasSectionPaciente(props: { patient: Patient }) {
-  const [future, setFuture] = useState<Appointment[]>([]);
-  const [past, setPast] = useState<Appointment[]>([]);
+// ----------------------
+// Seções do paciente
+// ----------------------
+function HomeSection(props: {
+  patient: Patient;
+  nextAppointment: Appointment | null;
+}) {
+  return (
+    <div style={{ padding: 16 }}>
+      <h2>Bem-vindo(a), {props.patient.name}</h2>
+      <p style={{ marginBottom: 10 }}>
+        Aqui você acompanha suas consultas, dados e pode conversar com a
+        clínica.
+      </p>
+
+      <div
+        style={{
+          display: "grid",
+          gap: 12,
+          gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)",
+        }}
+      >
+        <div
+          style={{
+            background: "#fff",
+            borderRadius: 10,
+            padding: 12,
+            boxShadow: "0 2px 6px rgba(0,0,0,0.05)",
+          }}
+        >
+          <h3 style={{ fontSize: 15, marginBottom: 6 }}>Próxima consulta</h3>
+          {props.nextAppointment ? (
+            <>
+              <p style={{ fontSize: 14 }}>
+                <b>
+                  {new Date(
+                    props.nextAppointment.start_time
+                  ).toLocaleString("pt-BR")}
+                </b>
+              </p>
+              <p style={{ fontSize: 13 }}>
+                Status: {props.nextAppointment.status}{" "}
+                {props.nextAppointment.reason &&
+                  `– ${props.nextAppointment.reason}`}
+              </p>
+            </>
+          ) : (
+            <p style={{ fontSize: 13, color: "#666" }}>
+              Você não tem consultas futuras agendadas.
+            </p>
+          )}
+        </div>
+
+        <div
+          style={{
+            background: "#fff",
+            borderRadius: 10,
+            padding: 12,
+            boxShadow: "0 2px 6px rgba(0,0,0,0.05)",
+          }}
+        >
+          <h3 style={{ fontSize: 15, marginBottom: 6 }}>
+            Atalhos rápidos
+          </h3>
+          <ul style={{ fontSize: 13, paddingLeft: 18 }}>
+            <li>Visualizar ou reagendar consultas</li>
+            <li>Falar com a clínica pelo chat</li>
+            <li>Acessar seus dados e observações</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConsultasSection(props: { patient: Patient }) {
+  const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    async function load() {
-      setLoading(true);
-      const { data, error } = await supabaseP
-        .from("appointments")
-        .select("id,start_time,status,reason")
-        .eq("patient_id", props.patient.id)
-        .order("start_time", { ascending: true });
+  async function load() {
+    setLoading(true);
+    const { data, error } = await supabase
+      .from("appointments")
+      .select("id,start_time,status,reason,patient_id")
+      .eq("patient_id", props.patient.id)
+      .order("start_time", { ascending: true });
 
-      if (error) {
-        console.error(error);
-        alert("Erro ao carregar consultas.");
-        setLoading(false);
-        return;
-      }
-
-      const now = new Date();
-      const fut: Appointment[] = [];
-      const pst: Appointment[] = [];
-      (data || []).forEach((a: any) => {
-        const dt = new Date(a.start_time);
-        if (dt >= now) fut.push(a as Appointment);
-        else pst.push(a as Appointment);
-      });
-
-      setFuture(fut);
-      setPast(pst);
-      setLoading(false);
+    if (!error && data) {
+      setAppointments(
+        data.map((a) => ({
+          id: a.id,
+          start_time: a.start_time,
+          status: a.status,
+          reason: a.reason,
+        })) as Appointment[]
+      );
     }
+    setLoading(false);
+  }
+
+  useEffect(() => {
     load();
-  }, [props.patient.id]);
+  }, []);
+
+  const future = appointments.filter(
+    (a) => new Date(a.start_time).getTime() >= Date.now()
+  );
+  const past = appointments.filter(
+    (a) => new Date(a.start_time).getTime() < Date.now()
+  );
 
   return (
     <div style={{ padding: 16 }}>
-      <h2>Minhas Consultas</h2>
+      <h2>Minhas consultas</h2>
       {loading ? (
         <p>Carregando...</p>
       ) : (
         <>
-          <h3>Próximas consultas</h3>
+          <h3>Próximas</h3>
           {future.length === 0 ? (
-            <p>Nenhuma consulta futura agendada.</p>
+            <p style={{ fontSize: 13 }}>Nenhuma consulta futura.</p>
           ) : (
-            <ul style={{ fontSize: 14 }}>
+            <ul>
               {future.map((a) => (
-                <li key={a.id}>
-                  {new Date(a.start_time).toLocaleString("pt-BR")} —{" "}
-                  {a.status} — {a.reason || "Consulta"}
+                <li key={a.id} style={{ marginBottom: 4, fontSize: 13 }}>
+                  {new Date(a.start_time).toLocaleString("pt-BR")} –{" "}
+                  {a.status} – {a.reason || "Sem descrição"}
                 </li>
               ))}
             </ul>
           )}
 
-          <h3 style={{ marginTop: 16 }}>Consultas anteriores</h3>
+          <h3>Histórico</h3>
           {past.length === 0 ? (
-            <p>Nenhuma consulta anterior registrada.</p>
+            <p style={{ fontSize: 13 }}>Nenhuma consulta anterior.</p>
           ) : (
-            <ul style={{ fontSize: 14 }}>
+            <ul>
               {past.map((a) => (
-                <li key={a.id}>
-                  {new Date(a.start_time).toLocaleString("pt-BR")} —{" "}
-                  {a.status} — {a.reason || "Consulta"}
+                <li key={a.id} style={{ marginBottom: 4, fontSize: 13 }}>
+                  {new Date(a.start_time).toLocaleString("pt-BR")} –{" "}
+                  {a.status} – {a.reason || "Sem descrição"}
                 </li>
               ))}
             </ul>
@@ -370,251 +455,123 @@ function ConsultasSectionPaciente(props: { patient: Patient }) {
   );
 }
 
-function AgendarSectionPaciente(props: { patient: Patient }) {
-  const [form, setForm] = useState({
-    date: "",
-    time: "",
-    reason: "",
-  });
-  const [selected, setSelected] = useState<string>("");
-  const [myAppointments, setMyAppointments] = useState<Appointment[]>([]);
-  const [loading, setLoading] = useState(true);
+function AgendarSection(props: { patient: Patient }) {
+  const [date, setDate] = useState("");
+  const [time, setTime] = useState("");
+  const [reason, setReason] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
 
-  async function load() {
-    setLoading(true);
-    const { data, error } = await supabaseP
-      .from("appointments")
-      .select("id,start_time,status,reason")
-      .eq("patient_id", props.patient.id)
-      .order("start_time", { ascending: true });
-
-    if (error) {
-      console.error(error);
-      alert("Erro ao carregar consultas.");
-    } else {
-      setMyAppointments((data || []) as Appointment[]);
-    }
-    setLoading(false);
-  }
-
-  useEffect(() => {
-    load();
-  }, [props.patient.id]);
-
-  function handleChange(
-    e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>
-  ) {
-    const { name, value } = e.target;
-    setForm((p) => ({ ...p, [name]: value }));
-  }
-
-  async function solicitarAgendamento(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!form.date || !form.time) return;
-    const start = new Date(`${form.date}T${form.time}:00`);
-    const { error } = await supabaseP.from("appointments").insert({
-      patient_id: props.patient.id,
-      start_time: start.toISOString(),
-      reason: form.reason || "Solicitação via portal",
-      status: "solicitado",
-    });
-    if (error) {
-      console.error(error);
-      alert("Erro ao solicitar agendamento.");
-    } else {
-      alert("Solicitação enviada. A clínica confirmará o horário.");
-      setForm({ date: "", time: "", reason: "" });
-      await load();
-    }
-  }
+    if (!date || !time) return;
+    setSaving(true);
+    setMessage("");
 
-  async function cancelar(id: string) {
-    if (!window.confirm("Deseja realmente solicitar cancelamento?")) return;
-    const { error } = await supabaseP
-      .from("appointments")
-      .update({ status: "cancelamento_solicitado" })
-      .eq("id", id);
-    if (error) {
-      console.error(error);
-      alert("Erro ao solicitar cancelamento.");
-    } else {
-      await load();
-    }
-  }
-
-  async function reagendar(e: React.FormEvent) {
-    e.preventDefault();
-    if (!selected || !form.date || !form.time) return;
-    const start = new Date(`${form.date}T${form.time}:00`);
-    const { error } = await supabaseP
-      .from("appointments")
-      .update({
+    try {
+      const start = new Date(`${date}T${time}:00`);
+      const { error } = await supabase.from("appointments").insert({
+        patient_id: props.patient.id,
         start_time: start.toISOString(),
-        status: "reagendamento_solicitado",
-      })
-      .eq("id", selected);
-    if (error) {
-      console.error(error);
-      alert("Erro ao solicitar reagendamento.");
-    } else {
-      alert("Reagendamento solicitado. A clínica confirmará o novo horário.");
-      setSelected("");
-      setForm({ date: "", time: "", reason: "" });
-      await load();
+        reason: reason || null,
+        status: "agendado", // clínica pode mudar para confirmado
+      });
+
+      if (error) {
+        console.error(error);
+        setMessage("Erro ao solicitar agendamento.");
+      } else {
+        setMessage(
+          "Solicitação registrada. A clínica irá confirmar o horário."
+        );
+        setDate("");
+        setTime("");
+        setReason("");
+      }
+    } catch (e) {
+      console.error(e);
+      setMessage("Erro inesperado ao agendar.");
+    } finally {
+      setSaving(false);
     }
   }
 
   return (
     <div style={{ padding: 16 }}>
-      <h2>Agendar / Reagendar / Cancelar</h2>
-      <div
-        style={{
-          display: "flex",
-          gap: 24,
-          flexWrap: "wrap",
-          alignItems: "flex-start",
-        }}
+      <h2>Agendar consulta</h2>
+      <p style={{ fontSize: 13, marginBottom: 8 }}>
+        Escolha uma data e horário preferencial. A clínica irá confirmar ou
+        sugerir outro horário.
+      </p>
+      <form
+        onSubmit={handleSubmit}
+        style={{ display: "grid", gap: 8, maxWidth: 360 }}
       >
-        <form
-          onSubmit={solicitarAgendamento}
-          style={{
-            flex: 1,
-            minWidth: 260,
-            maxWidth: 360,
-            background: "#fff",
-            padding: 16,
-            borderRadius: 10,
-            boxShadow: "0 1px 4px rgba(0,0,0,0.05)",
-          }}
-        >
-          <h3>Nova solicitação de consulta</h3>
+        <div style={{ display: "flex", gap: 8 }}>
           <input
             type="date"
-            name="date"
-            value={form.date}
-            onChange={handleChange}
-            style={{ padding: 8, borderRadius: 8, border: "1px solid #ccc", marginTop: 4, width: "100%" }}
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
+            required
+            style={{
+              flex: 1,
+              padding: 8,
+              borderRadius: 6,
+              border: "1px solid #ccc",
+            }}
           />
           <input
             type="time"
-            name="time"
-            value={form.time}
-            onChange={handleChange}
-            style={{ padding: 8, borderRadius: 8, border: "1px solid #ccc", marginTop: 8, width: "100%" }}
-          />
-          <textarea
-            name="reason"
-            value={form.reason}
-            onChange={handleChange}
-            placeholder="Motivo / Observações"
-            rows={3}
+            value={time}
+            onChange={(e) => setTime(e.target.value)}
+            required
             style={{
+              flex: 1,
               padding: 8,
-              borderRadius: 8,
+              borderRadius: 6,
               border: "1px solid #ccc",
-              marginTop: 8,
-              width: "100%",
             }}
           />
-          <button
-            type="submit"
-            style={{
-              padding: "8px 12px",
-              borderRadius: 8,
-              border: "none",
-              background: "#1a73e8",
-              color: "#fff",
-              cursor: "pointer",
-              marginTop: 10,
-            }}
-          >
-            Enviar solicitação
-          </button>
-        </form>
-
-        <div
+        </div>
+        <textarea
+          value={reason}
+          onChange={(e) => setReason(e.target.value)}
+          placeholder="Motivo / Observações (opcional)"
+          rows={3}
           style={{
-            flex: 1,
-            minWidth: 260,
-            maxWidth: 420,
+            padding: 8,
+            borderRadius: 6,
+            border: "1px solid #ccc",
+          }}
+        />
+        <button
+          type="submit"
+          disabled={saving}
+          style={{
+            padding: "8px 12px",
+            borderRadius: 6,
+            border: "none",
+            background: "#1a73e8",
+            color: "#fff",
+            cursor: "pointer",
           }}
         >
-          <h3>Minhas consultas para reagendar/cancelar</h3>
-          {loading ? (
-            <p>Carregando...</p>
-          ) : myAppointments.length === 0 ? (
-            <p>Nenhuma consulta registrada.</p>
-          ) : (
-            <ul style={{ fontSize: 13 }}>
-              {myAppointments.map((a) => (
-                <li key={a.id}>
-                  <label>
-                    <input
-                      type="radio"
-                      name="sel"
-                      checked={selected === a.id}
-                      onChange={() => setSelected(a.id)}
-                      style={{ marginRight: 6 }}
-                    />
-                    {new Date(a.start_time).toLocaleString("pt-BR")} —{" "}
-                    {a.status} — {a.reason || "Consulta"}
-                  </label>{" "}
-                  <button onClick={() => cancelar(a.id)}>Cancelar</button>
-                </li>
-              ))}
-            </ul>
-          )}
-
-          <form
-            onSubmit={reagendar}
-            style={{
-              marginTop: 12,
-              display: "grid",
-              gap: 6,
-              maxWidth: 360,
-            }}
-          >
-            <h4>Reagendar consulta selecionada</h4>
-            <input
-              type="date"
-              name="date"
-              value={form.date}
-              onChange={handleChange}
-              style={{ padding: 8, borderRadius: 8, border: "1px solid #ccc" }}
-            />
-            <input
-              type="time"
-              name="time"
-              value={form.time}
-              onChange={handleChange}
-              style={{ padding: 8, borderRadius: 8, border: "1px solid #ccc" }}
-            />
-            <button
-              type="submit"
-              style={{
-                padding: "6px 10px",
-                borderRadius: 8,
-                border: "none",
-                background: "#1a73e8",
-                color: "#fff",
-                cursor: "pointer",
-              }}
-            >
-              Solicitar reagendamento
-            </button>
-          </form>
-        </div>
-      </div>
+          {saving ? "Enviando..." : "Solicitar agendamento"}
+        </button>
+        {message && (
+          <div style={{ fontSize: 12, color: "#555" }}>{message}</div>
+        )}
+      </form>
     </div>
   );
 }
 
-function ChatPacienteSection() {
-  const [messages, setMessages] = useState<ChatMsg[]>([
+function ChatPacienteSection(props: { patient: Patient }) {
+  const [messages, setMessages] = useState<ChatMessage[]>([
     {
       role: "assistant",
       content:
-        "Olá! Sou o assistente da clínica. Posso ajudar com dúvidas sobre consultas, retornos e orientações gerais.",
+        "Olá! Sou o assistente virtual da clínica MedIntelli. Como posso ajudar você hoje?",
     },
   ]);
   const [input, setInput] = useState("");
@@ -643,6 +600,12 @@ function ChatPacienteSection() {
         model: "gpt-4o-mini",
         messages: [
           { role: "system" as const, content: PATIENT_KB },
+          {
+            role: "system" as const,
+            content: `Nome do paciente: ${props.patient.name}. CPF: ${
+              props.patient.cpf || "não informado"
+            }.`,
+          },
           ...newMessages,
         ],
       };
@@ -663,15 +626,15 @@ function ChatPacienteSection() {
       const data = await resp.json();
       const answer =
         data.choices?.[0]?.message?.content ||
-        "Não consegui responder agora. Tente novamente em instantes.";
+        "Desculpe, não consegui responder agora.";
 
       setMessages((prev) => [
         ...prev,
         { role: "assistant", content: String(answer) },
       ]);
-    } catch (err) {
-      console.error(err);
-      setError("Erro ao conversar com a IA.");
+    } catch (e) {
+      console.error(e);
+      setError("Erro ao conversar com a IA. Tente novamente.");
     } finally {
       setLoading(false);
     }
@@ -679,18 +642,20 @@ function ChatPacienteSection() {
 
   return (
     <div style={{ padding: 16 }}>
-      <h2>Chat IA do Paciente</h2>
-      <p style={{ fontSize: 13, marginBottom: 8 }}>
-        Use este chat apenas para dúvidas gerais. Em caso de urgência, procure
-        atendimento médico imediatamente.
+      <h2>Chat com a clínica</h2>
+      <p style={{ fontSize: 13, color: "#555", marginBottom: 8 }}>
+        Use este canal para tirar dúvidas gerais. Não substitui consulta
+        presencial ou telemedicina.
       </p>
+
       <div
         style={{
           border: "1px solid #ccc",
-          borderRadius: 10,
+          borderRadius: 8,
           padding: 10,
           height: 360,
           overflowY: "auto",
+          marginBottom: 8,
           background: "#fafafa",
         }}
       >
@@ -699,10 +664,10 @@ function ChatPacienteSection() {
             key={i}
             style={{
               textAlign: m.role === "user" ? "right" : "left",
-              marginBottom: 6,
+              marginBottom: 8,
             }}
           >
-            <span
+            <div
               style={{
                 display: "inline-block",
                 padding: "6px 10px",
@@ -715,20 +680,22 @@ function ChatPacienteSection() {
               }}
             >
               {m.content}
-            </span>
+            </div>
           </div>
         ))}
-        {loading && <p>IA respondendo...</p>}
+        {loading && <p>IA está respondendo...</p>}
       </div>
+
       {error && <p style={{ color: "red", fontSize: 12 }}>{error}</p>}
+
       <form
         onSubmit={handleSend}
-        style={{ display: "flex", gap: 8, marginTop: 8 }}
+        style={{ display: "flex", gap: 8, marginTop: 4 }}
       >
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Digite sua dúvida..."
+          placeholder="Digite sua mensagem..."
           style={{
             flex: 1,
             padding: 8,
@@ -755,166 +722,169 @@ function ChatPacienteSection() {
   );
 }
 
-function DocumentosSection(props: { patient: Patient }) {
-  const [docs, setDocs] = useState<Document[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    async function load() {
-      setLoading(true);
-      const { data, error } = await supabaseP
-        .from("patient_documents")
-        .select("*")
-        .eq("patient_id", props.patient.id)
-        .order("created_at", { ascending: false });
-
-      if (error) {
-        console.error(error);
-        alert("Erro ao carregar documentos.");
-      } else {
-        setDocs((data || []) as Document[]);
-      }
-      setLoading(false);
-    }
-    load();
-  }, [props.patient.id]);
-
+function DadosSection(props: { patient: Patient }) {
   return (
     <div style={{ padding: 16 }}>
-      <h2>Exames, Receitas e Documentos</h2>
-      {loading ? (
-        <p>Carregando...</p>
-      ) : docs.length === 0 ? (
-        <p>Nenhum documento disponível.</p>
-      ) : (
-        <ul style={{ fontSize: 14 }}>
-          {docs.map((d) => (
-            <li key={d.id}>
-              <strong>{d.type || "Documento"}:</strong> {d.title || "-"} —{" "}
-              {new Date(d.created_at).toLocaleString("pt-BR")}{" "}
-              {d.url && (
-                <a href={d.url} target="_blank" style={{ marginLeft: 8 }}>
-                  Abrir
-                </a>
-              )}
-            </li>
-          ))}
-        </ul>
-      )}
+      <h2>Meus dados</h2>
+      <table
+        style={{
+          borderCollapse: "collapse",
+          minWidth: 320,
+          fontSize: 14,
+          marginTop: 8,
+        }}
+      >
+        <tbody>
+          <tr>
+            <td style={{ border: "1px solid #ddd", padding: 6 }}>Nome</td>
+            <td style={{ border: "1px solid #ddd", padding: 6 }}>
+              {props.patient.name}
+            </td>
+          </tr>
+          <tr>
+            <td style={{ border: "1px solid #ddd", padding: 6 }}>CPF</td>
+            <td style={{ border: "1px solid #ddd", padding: 6 }}>
+              {props.patient.cpf || "-"}
+            </td>
+          </tr>
+          <tr>
+            <td style={{ border: "1px solid #ddd", padding: 6 }}>Telefone</td>
+            <td style={{ border: "1px solid #ddd", padding: 6 }}>
+              {props.patient.phone || "-"}
+            </td>
+          </tr>
+          <tr>
+            <td style={{ border: "1px solid #ddd", padding: 6 }}>
+              Data de nascimento
+            </td>
+            <td style={{ border: "1px solid #ddd", padding: 6 }}>
+              {props.patient.birth_date || "-"}
+            </td>
+          </tr>
+          <tr>
+            <td style={{ border: "1px solid #ddd", padding: 6 }}>
+              Observações
+            </td>
+            <td style={{ border: "1px solid #ddd", padding: 6 }}>
+              {props.patient.notes || "-"}
+            </td>
+          </tr>
+        </tbody>
+      </table>
     </div>
   );
 }
 
-function MensagensSection(props: { patient: Patient }) {
-  const [msgs, setMsgs] = useState<Message[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    async function load() {
-      setLoading(true);
-      const { data, error } = await supabaseP
-        .from("patient_messages")
-        .select("*")
-        .eq("patient_id", props.patient.id)
-        .order("created_at", { ascending: false })
-        .limit(50);
-
-      if (error) {
-        console.error(error);
-        alert("Erro ao carregar mensagens.");
-      } else {
-        setMsgs((data || []) as Message[]);
-      }
-      setLoading(false);
-    }
-    load();
-  }, [props.patient.id]);
-
+function DocsSection() {
   return (
     <div style={{ padding: 16 }}>
-      <h2>Mensagens da Clínica</h2>
-      {loading ? (
-        <p>Carregando...</p>
-      ) : msgs.length === 0 ? (
-        <p>Nenhuma mensagem registrada.</p>
-      ) : (
-        <ul style={{ fontSize: 14 }}>
-          {msgs.map((m) => (
-            <li key={m.id}>
-              <strong>[{m.channel || "canal"}]</strong>{" "}
-              {new Date(m.created_at).toLocaleString("pt-BR")} —{" "}
-              {m.content || ""}
-            </li>
-          ))}
-        </ul>
-      )}
-      <p style={{ marginTop: 8, fontSize: 12, color: "#555" }}>
-        Estas mensagens podem ser alimentadas por integrações de WhatsApp, SMS
-        ou e-mail, registrando automaticamente tudo que é enviado ao paciente.
+      <h2>Documentos e exames</h2>
+      <p style={{ fontSize: 13 }}>
+        Esta área poderá listar os seus exames, laudos, receitas e documentos
+        em PDF, conforme a clínica for anexando.
       </p>
+      <p style={{ fontSize: 13, marginTop: 6 }}>
+        A implementação no banco pode ser feita com uma tabela{" "}
+        <code>patient_documents</code> armazenando:
+      </p>
+      <ul style={{ fontSize: 13 }}>
+        <li>tipo (exame, laudo, receita, atestado)</li>
+        <li>descrição</li>
+        <li>URL do arquivo (Storage do Supabase)</li>
+        <li>data de emissão</li>
+      </ul>
     </div>
   );
 }
 
-// ------- App principal Paciente -------
+// ----------------------
+// App principal
+// ----------------------
 export default function App() {
+  const [section, setSection] = useState<Section>("login");
   const [patient, setPatient] = useState<Patient | null>(null);
-  const [section, setSection] = useState<PacSection>("home");
+  const [nextAppointment, setNextAppointment] = useState<Appointment | null>(
+    null
+  );
 
   useEffect(() => {
-    const raw = localStorage.getItem("medintelli_paciente_session");
-    if (raw) {
-      try {
-        const p = JSON.parse(raw) as Patient;
-        setPatient(p);
-      } catch {
-        // ignore
+    const id = localStorage.getItem("medintelli_patient_id");
+    async function fetchPatient(patientId: string) {
+      const { data, error } = await supabase
+        .from("patients")
+        .select("id,name,cpf,phone,birth_date,notes")
+        .eq("id", patientId)
+        .maybeSingle();
+
+      if (!error && data) {
+        setPatient(data as Patient);
+        setSection("home");
+      } else {
+        localStorage.removeItem("medintelli_patient_id");
       }
+    }
+
+    if (id) {
+      fetchPatient(id);
     }
   }, []);
 
-  function handleLogout() {
-    localStorage.removeItem("medintelli_paciente_session");
-    setPatient(null);
+  useEffect(() => {
+    async function loadNext() {
+      if (!patient) return;
+      const { data, error } = await supabase
+        .from("appointments")
+        .select("id,start_time,status,reason,patient_id")
+        .eq("patient_id", patient.id)
+        .gte("start_time", new Date().toISOString())
+        .order("start_time", { ascending: true })
+        .limit(1);
+
+      if (!error && data && data.length > 0) {
+        const a = data[0];
+        setNextAppointment({
+          id: a.id,
+          start_time: a.start_time,
+          status: a.status,
+          reason: a.reason,
+        });
+      } else {
+        setNextAppointment(null);
+      }
+    }
+    loadNext();
+  }, [patient]);
+
+  function handleLoggedIn(p: Patient) {
+    setPatient(p);
     setSection("home");
   }
 
-  if (!patient) {
-    return <LoginPaciente onLogin={setPatient} />;
+  function handleLogout() {
+    localStorage.removeItem("medintelli_patient_id");
+    setPatient(null);
+    setSection("login");
+  }
+
+  if (!patient || section === "login") {
+    return <LoginScreen onLoggedIn={handleLoggedIn} />;
   }
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        display: "flex",
-        flexDirection: "column",
-        background: "#f5f7fb",
-        fontFamily: "system-ui, sans-serif",
-      }}
-    >
-      <HeaderPaciente
+    <div style={{ fontFamily: "system-ui, sans-serif", minHeight: "100vh" }}>
+      <TopBar
         patient={patient}
-        section={section}
         onChangeSection={setSection}
         onLogout={handleLogout}
       />
-      <main style={{ flex: 1 }}>
-        {section === "home" && <HomePaciente patient={patient} />}
-        {section === "consultas" && (
-          <ConsultasSectionPaciente patient={patient} />
-        )}
-        {section === "agendar" && (
-          <AgendarSectionPaciente patient={patient} />
-        )}
-        {section === "chat" && <ChatPacienteSection />}
-        {section === "documentos" && (
-          <DocumentosSection patient={patient} />
-        )}
-        {section === "mensagens" && (
-          <MensagensSection patient={patient} />
-        )}
-      </main>
+      {section === "home" && (
+        <HomeSection patient={patient} nextAppointment={nextAppointment} />
+      )}
+      {section === "consultas" && <ConsultasSection patient={patient} />}
+      {section === "agendar" && <AgendarSection patient={patient} />}
+      {section === "chat" && <ChatPacienteSection patient={patient} />}
+      {section === "dados" && <DadosSection patient={patient} />}
+      {section === "docs" && <DocsSection />}
     </div>
   );
 }
